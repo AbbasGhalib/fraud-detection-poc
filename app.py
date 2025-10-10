@@ -30,18 +30,18 @@ from tax_validators.image_analyzer import (
 	analyze_image_quality,
 )
 
-st.set_page_config(page_title="Tax Document Fraud Detection", layout="wide")
+st.set_page_config(page_title="LendGuard", layout="wide")
 
-st.title("🔍 Canadian Tax Document Fraud Detection POC")
+st.title("🔍 LendGuard")
 st.markdown("Upload T1 Income Tax Return and Notice of Assessment for validation")
 
 # Sidebar for API key input
-with st.sidebar:
-	st.header("Configuration")
-	api_key = st.text_input("Gemini API Key", type="password")
-	if api_key:
-		os.environ['GEMINI_API_KEY'] = api_key
-		st.success("API Key configured")
+# with st.sidebar:
+# 	st.header("Configuration")
+# 	api_key = st.text_input("Gemini API Key", type="password")
+# 	if api_key:
+# 		os.environ['GEMINI_API_KEY'] = api_key
+# 		st.success("API Key configured")
 
 # File uploaders
 col1, col2 = st.columns(2)
@@ -220,6 +220,147 @@ if st.button("🚀 Analyze Documents", type="primary", disabled=not (t1_file and
 					file_name="fraud_detection_results.json",
 					mime="application/json",
 				)
+
+# ============================================================================
+# FORENSIC ANALYSIS SECTION (Independent Module)
+# ============================================================================
+
+st.markdown("---")
+st.header("🔍 Document Forensic Analysis")
+st.markdown("""
+Upload any PDF document for independent forensic analysis.
+This checks for visual forgery indicators like font inconsistencies,
+text misalignment, suspicious metadata, and image quality issues.
+""")
+
+forensic_file = st.file_uploader(
+	"Upload PDF for Forensic Analysis",
+	type=['pdf'],
+	key="forensic_upload",
+	help="Upload T1, NOA, or any other PDF document"
+)
+
+if forensic_file:
+	st.info(f"📄 Analyzing: {forensic_file.name}")
+	
+	# Save uploaded file temporarily
+	import tempfile
+	import os
+	from forensics import analyze_document_forensics, create_forensic_visualizations
+	
+	with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+		tmp_file.write(forensic_file.getvalue())
+		tmp_path = tmp_file.name
+	
+	try:
+		with st.spinner("Running forensic analysis..."):
+			# Get PDF bytes for image analysis
+			pdf_bytes = forensic_file.getvalue()
+			
+			# Run analysis
+			results = analyze_document_forensics(tmp_path, pdf_bytes)
+			
+			# Display overall risk
+			risk_colors = {
+				'LOW': '🟢',
+				'MEDIUM': '🟡',
+				'HIGH': '🔴'
+			}
+			
+			col1, col2, col3 = st.columns([1, 2, 1])
+			with col2:
+				st.metric(
+					"Overall Forensic Risk Score",
+					f"{results['overall_score']:.0f}/100",
+					delta=None
+				)
+				st.markdown(f"### {risk_colors.get(results['risk_level'], '⚪')} Risk Level: {results['risk_level']}")
+			
+			# Detailed scores
+			st.subheader("📊 Detailed Analysis")
+			
+			score_cols = st.columns(5)
+			checks = [
+				('alignment', 'Text Alignment'),
+				('fonts', 'Font Consistency'),
+				('metadata', 'Metadata'),
+				('numbers', 'Number Patterns'),
+				('image', 'Image Quality')
+			]
+			
+			for idx, (key, label) in enumerate(checks):
+				with score_cols[idx]:
+					score = results[key].get('risk_score', 0)
+					color = '🟢' if score < 30 else '🟡' if score < 60 else '🔴'
+					st.metric(label, f"{score}/100", delta=None)
+					st.markdown(f"{color}")
+			
+			# Expandable details
+			st.subheader("🔍 Detailed Findings")
+			
+			with st.expander("📏 Text Alignment Analysis"):
+				align_data = results['alignment']
+				if align_data.get('count', 0) > 0:
+					st.warning(f"Found {align_data['count']} alignment issues")
+					if align_data.get('issues'):
+						st.dataframe(align_data['issues'][:10])
+				else:
+					st.success("✅ All text properly aligned")
+			
+			with st.expander("🔤 Font Consistency Analysis"):
+				font_data = results['fonts']
+				st.write(f"**Total unique fonts:** {font_data.get('total_unique_fonts', 0)}")
+				if font_data.get('flags'):
+					for flag in font_data['flags']:
+						st.warning(f"⚠️ {flag}")
+				else:
+					st.success("✅ Font usage consistent")
+			
+			with st.expander("📋 Metadata Analysis"):
+				meta_data = results['metadata']
+				if meta_data.get('metadata'):
+					st.json(meta_data['metadata'])
+				if meta_data.get('flags'):
+					for flag in meta_data['flags']:
+						st.warning(f"⚠️ {flag}")
+				else:
+					st.success("✅ Metadata appears legitimate")
+			
+			with st.expander("🔢 Number Pattern Analysis"):
+				num_data = results['numbers']
+				st.write(f"**Total decimal numbers:** {num_data.get('total_numbers', 0)}")
+				if num_data.get('precision_map'):
+					st.write("**Decimal precision distribution:**")
+					for precision, numbers in num_data['precision_map'].items():
+						st.write(f"  - {precision} decimal places: {len(numbers)} numbers")
+				if num_data.get('flags'):
+					for flag in num_data['flags']:
+						st.warning(f"⚠️ {flag}")
+				else:
+					st.success("✅ Number formatting consistent")
+			
+			with st.expander("🖼️ Image Quality Analysis"):
+				img_data = results['image']
+				if img_data.get('avg_blur'):
+					st.write(f"**Average blur score:** {img_data['avg_blur']:.1f}")
+					st.caption("(Higher = Sharper, <100 = Potentially Blurry)")
+				if img_data.get('flags'):
+					for flag in img_data['flags']:
+						st.warning(f"⚠️ {flag}")
+				else:
+					st.success("✅ Image quality normal")
+			
+			# Visual annotations
+			st.markdown("---")
+			create_forensic_visualizations(tmp_path, pdf_bytes, results, max_pages=2)
+			
+	except Exception as e:
+		st.error(f"Error during analysis: {str(e)}")
+	
+	finally:
+		# Clean up temp file
+		if os.path.exists(tmp_path):
+			os.unlink(tmp_path)
 
 # Footer
 st.markdown("---")
