@@ -114,6 +114,12 @@ if st.button("🚀 Analyze Documents", type="primary", disabled=not (t1_file and
 						t1_data.get('AccountantPhoneNumber'),
 						model
 					)
+				elif t1_data.get('AccountantName'):
+					accountant_results = validate_accountant_info(
+						t1_data.get('Accountant_Name'),
+						t1_data.get('Accountant_Phone_Number'),
+						model
+					)
 				else:
 					accountant_results = {"flags": ["No accountant information found - FLAGGED"]}
 			except Exception as e:
