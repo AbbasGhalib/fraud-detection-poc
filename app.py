@@ -108,16 +108,10 @@ if st.button("🚀 Analyze Documents", type="primary", disabled=not (t1_file and
 			status.info("Step 5: Validating accountant information...")
 			progress.progress(75)
 			try:
-				if t1_data.get('AccountantName'):
+				if t1_data.get('accountant_name'):
 					accountant_results = validate_accountant_info(
-						t1_data.get('AccountantName'),
-						t1_data.get('AccountantPhoneNumber'),
-						model
-					)
-				elif t1_data.get('AccountantName'):
-					accountant_results = validate_accountant_info(
-						t1_data.get('Accountant_Name'),
-						t1_data.get('Accountant_Phone_Number'),
+						t1_data.get('accountant_name'),
+						t1_data.get('accountant_phone'),
 						model
 					)
 				else:

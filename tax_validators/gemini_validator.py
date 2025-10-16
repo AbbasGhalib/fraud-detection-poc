@@ -53,18 +53,33 @@ def extract_structured_data_t1(text: str, model) -> dict:
     1. Social Insurance Number (SIN)
     2. Full Name
     3. Complete Address
-    4. Refund Amount (line 48400) or Balance Owing (line 48500)
-    5. Total Income (line 15000)
-    6. Net Income (line 23600)
-    7. Taxable Income (line 26000)
-    8. Tax Deducted (line 43700)
-    9. Tax Paid by Instalments (line 47600)
-    10. Accountant Name (if present)
-    11. Accountant Phone Number (if present)
+    4. Refund Amount or Balance Owing 
+    5. Total Income 
+    6. Net Income 
+    7. Taxable Income
+    8. Tax Deducted 
+    9. Tax Paid by Instalments 
+    10. Name of tax professional (if present)
+    11. Tax professional Phone Number (if present just extract the number not text associated with the number like "ext.")
     12. Date of Filing (signature date)
     
-    Return as JSON format only, no other text.
-    Use null for missing fields.
+    Return ONLY a JSON object with these EXACT field names:
+    {{
+      "sin": "value or null",
+      "full_name": "value or null",
+      "address": "value or null",
+      "refund_amount": "value or null",
+      "total_income": "value or null",
+      "net_income": "value or null",
+      "taxable_income": "value or null",
+      "tax_deducted": "value or null",
+      "tax_paid_instalments": "value or null",
+      "accountant_name": "value or null",
+      "accountant_phone": "value or null",
+      "filing_date": "value or null"
+    }}
+    
+    Use null for missing fields. Return ONLY the JSON, no other text.
     
     Document text:
     {text}
@@ -117,15 +132,28 @@ def extract_structured_data_noa(text: str, model) -> dict:
     2. Full Name
     3. Complete Address
     4. Refund Amount (shown in account summary)
-    5. Total Income (line 15000)
-    6. Net Income (line 23600)
-    7. Taxable Income (line 26000)
-    8. Total Income Tax Deducted (line 43700)
-    9. Tax Paid by Instalments (line 47600)
+    5. Total Income
+    6. Net Income
+    7. Taxable Income
+    8. Total Income Tax Deducted
+    9. Tax Paid by Instalments
     10. Date Issued (assessment date)
     
-    Return as JSON format only, no other text.
-    Use null for missing fields.
+    Return ONLY a JSON object with these EXACT field names:
+    {{
+      "sin": "value or null",
+      "full_name": "value or null",
+      "address": "value or null",
+      "refund_amount": "value or null",
+      "total_income": "value or null",
+      "net_income": "value or null",
+      "taxable_income": "value or null",
+      "tax_deducted": "value or null",
+      "tax_paid_instalments": "value or null",
+      "date_issued": "value or null"
+    }}
+    
+    Use null for missing fields. Return ONLY the JSON, no other text.
     
     Document text:
     {text}
