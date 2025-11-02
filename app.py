@@ -234,31 +234,61 @@ text misalignment, suspicious metadata, and image quality issues.
 """)
 
 forensic_file = st.file_uploader(
-	"Upload PDF for Forensic Analysis",
-	type=['pdf'],
+	"Upload Document for Forensic Analysis",
+	type=['pdf', 'jpg', 'jpeg', 'png'],
 	key="forensic_upload",
-	help="Upload T1, NOA, or any other PDF document"
+	help="Upload PDF, JPEG, or PNG document (T1, NOA, or any other document)"
 )
 
 if forensic_file:
 	st.info(f"📄 Analyzing: {forensic_file.name}")
 	
+	# Document type selector
+	doc_type = st.selectbox(
+		"Document Type",
+		options=['Unknown', 'NOA (Notice of Assessment)', 'T1 (Tax Return)', 'Other'],
+		help="Select document type for specialized checks (NOA-specific checks available)"
+	)
+	
+	# Map to simple type
+	doc_type_map = {
+		'NOA (Notice of Assessment)': 'noa',
+		'T1 (Tax Return)': 't1',
+		'Unknown': 'unknown',
+		'Other': 'unknown'
+	}
+	
+	doc_type_simple = doc_type_map[doc_type]
+	
 	# Save uploaded file temporarily
 	import tempfile
 	import os
 	from forensics import analyze_document_forensics, create_forensic_visualizations
+	from forensics.forensic_analyzer import preprocess_uploaded_file
+	
+	# Check if file is an image and convert if needed
+	file_name_lower = forensic_file.name.lower()
+	is_image = file_name_lower.endswith(('.jpg', '.jpeg', '.png'))
+	
+	if is_image:
+		st.info("📷 Image file detected - converting to PDF for analysis")
+		try:
+			pdf_bytes, file_type, temp_img_path = preprocess_uploaded_file(forensic_file)
+		except Exception as e:
+			st.error(f"Error converting image: {str(e)}")
+			st.stop()
+	else:
+		pdf_bytes = forensic_file.getvalue()
+		temp_img_path = None
 	
 	with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-		tmp_file.write(forensic_file.getvalue())
+		tmp_file.write(pdf_bytes)
 		tmp_path = tmp_file.name
 	
 	try:
 		with st.spinner("Running forensic analysis..."):
-			# Get PDF bytes for image analysis
-			pdf_bytes = forensic_file.getvalue()
-			
-			# Run analysis
-			results = analyze_document_forensics(tmp_path, pdf_bytes)
+			# Run analysis with new parameters
+			results = analyze_document_forensics(tmp_path, pdf_bytes, forensic_file.name, doc_type_simple)
 			
 			# Display overall risk
 			risk_colors = {
@@ -279,7 +309,7 @@ if forensic_file:
 			# Detailed scores
 			st.subheader("📊 Detailed Analysis")
 			
-			score_cols = st.columns(5)
+			# Determine which checks to show based on applicability
 			checks = [
 				('alignment', 'Text Alignment'),
 				('fonts', 'Font Consistency'),
@@ -287,6 +317,14 @@ if forensic_file:
 				('numbers', 'Number Patterns'),
 				('image', 'Image Quality')
 			]
+			
+			# Add NOA-specific checks if applicable
+			if results.get('page_numbers', {}).get('applicable'):
+				checks.append(('page_numbers', 'Page Numbers'))
+			if results.get('noa_id_check', {}).get('applicable'):
+				checks.append(('noa_id_check', 'ID Check'))
+			
+			score_cols = st.columns(len(checks))
 			
 			for idx, (key, label) in enumerate(checks):
 				with score_cols[idx]:
@@ -350,17 +388,104 @@ if forensic_file:
 				else:
 					st.success("✅ Image quality normal")
 			
+			# NEW: Page Number Check (NOA only)
+			if results.get('page_numbers', {}).get('applicable'):
+				with st.expander("📄 Page Number Consistency (NOA)"):
+					page_data = results['page_numbers']
+					
+					if page_data.get('error'):
+						st.warning(f"⚠️ {page_data.get('error')}")
+					elif page_data.get('issues'):
+						st.error(f"🚨 Found {len(page_data['issues'])} page numbering issues")
+						for issue in page_data['issues']:
+							st.warning(f"⚠️ {issue.get('issue', 'Unknown issue')}")
+						
+						if page_data.get('page_numbers_found'):
+							st.write("**Extracted page numbers:**")
+							import pandas as pd
+							st.dataframe(pd.DataFrame(page_data['page_numbers_found']))
+					else:
+						st.success("✅ Page numbering is consistent")
+						if page_data.get('page_numbers_found'):
+							st.write(f"**Total pages checked:** {page_data.get('total_pages', 0)}")
+			
+			# NEW: NOA ID Duplicate Check
+			if results.get('noa_id_check', {}).get('applicable'):
+				with st.expander("🆔 Identification Number Check (NOA)"):
+					id_data = results['noa_id_check']
+					
+					if id_data.get('error'):
+						st.warning(f"⚠️ {id_data.get('error')}")
+					elif id_data.get('is_duplicate'):
+						st.error("🚨 DUPLICATE ID DETECTED - POSSIBLE FORGERY!")
+						st.warning("This identification number has been used before:")
+						
+						dup_details = id_data.get('duplicate_details', {})
+						st.json(dup_details)
+						
+						for flag in id_data.get('flags', []):
+							st.error(flag)
+					else:
+						st.success(f"✅ ID Number: {id_data.get('id_number', 'N/A')}")
+						st.info("This is a new ID - recorded in forensic database")
+						
+						if id_data.get('extracted_info'):
+							st.write("**Extracted Information:**")
+							st.json(id_data['extracted_info'])
+						
+						for flag in id_data.get('flags', []):
+							st.info(flag)
+			
 			# Visual annotations
 			st.markdown("---")
 			create_forensic_visualizations(tmp_path, pdf_bytes, results, max_pages=2)
+			
+			# Database Management Section
+			st.markdown("---")
+			st.subheader("🗄️ Forensic Database")
+			
+			with st.expander("View Recorded NOA IDs"):
+				from forensics.database import ForensicDatabase
+				
+				db = ForensicDatabase()
+				records = db.get_all_records()
+				
+				if records:
+					import pandas as pd
+					
+					df = pd.DataFrame(records, columns=[
+						'ID', 'ID Number', 'SIN Last 4', 'Name', 'Date Issued',
+						'Upload Time', 'Doc Hash', 'File Name', 'Notes', 'Created At'
+					])
+					
+					st.dataframe(df)
+					st.caption(f"Total records: {len(records)}")
+				else:
+					st.info("No records in database yet")
+			
+			with st.expander("View Duplicate Detection History"):
+				from forensics.database import ForensicDatabase
+				
+				db = ForensicDatabase()
+				duplicates = db.get_duplicate_history()
+				
+				if duplicates:
+					st.warning(f"⚠️ {len(duplicates)} duplicate detections recorded")
+					for dup in duplicates:
+						st.error(f"ID: {dup[1]} | File: {dup[3]} | Detected: {dup[4]}")
+				else:
+					st.success("No duplicates detected yet")
 			
 	except Exception as e:
 		st.error(f"Error during analysis: {str(e)}")
 	
 	finally:
-		# Clean up temp file
+		# Clean up temp files
 		if os.path.exists(tmp_path):
 			os.unlink(tmp_path)
+		# Clean up temp image file if it exists
+		if temp_img_path and os.path.exists(temp_img_path):
+			os.unlink(temp_img_path)
 
 # Footer
 st.markdown("---")

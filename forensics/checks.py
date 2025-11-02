@@ -6,6 +6,24 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 from collections import Counter
 import re
+import io
+
+# Check if pytesseract is available
+try:
+    import pytesseract
+    import sys
+    
+    # Set Tesseract path for Windows if needed
+    if sys.platform == 'win32':
+        import os
+        tesseract_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        if os.path.exists(tesseract_path):
+            pytesseract.pytesseract.tesseract_cmd = tesseract_path
+    
+    pytesseract.get_tesseract_version()
+    TESSERACT_AVAILABLE = True
+except:
+    TESSERACT_AVAILABLE = False
 
 def check_text_alignment(pdf_path):
     """
@@ -269,5 +287,299 @@ def check_image_quality(pdf_bytes, max_pages=3):
             'blur_scores': [],
             'avg_blur': 0,
             'flags': [f'Image analysis unavailable: {str(e)}']
+        }
+
+
+def check_page_numbers(pdf_bytes, doc_type='unknown'):
+    """
+    Check if page numbers on odd pages are sequential and consistent
+    Only applicable to NOA documents
+    
+    Args:
+        pdf_bytes: PDF file as bytes
+        doc_type: Document type ('noa', 't1', or 'unknown')
+    
+    Returns:
+        dict with risk_score, issues, and page_numbers found
+    """
+    
+    # Skip if not NOA
+    if doc_type.lower() != 'noa':
+        return {
+            'risk_score': 0,
+            'applicable': False,
+            'message': 'Page number check only applies to NOA documents'
+        }
+    
+    # Check if Tesseract is available
+    if not TESSERACT_AVAILABLE:
+        return {
+            'risk_score': 0,
+            'applicable': True,
+            'error': 'Tesseract OCR not installed - required for page number extraction',
+            'issues': []
+        }
+    
+    try:
+        # Convert PDF to images
+        images = convert_from_bytes(pdf_bytes, dpi=200)
+        
+        page_numbers_found = []
+        issues = []
+        
+        # Check odd pages only (0-indexed: 0, 2, 4...)
+        for idx, img in enumerate(images):
+            page_num = idx + 1  # 1-indexed page number
+            
+            # Only check odd pages
+            if page_num % 2 == 1:
+                # Crop top-right corner (approx coordinates)
+                width, height = img.size
+                top_right = img.crop((width * 0.8, 0, width, height * 0.1))
+                
+                # OCR to extract text
+                text = pytesseract.image_to_string(top_right, config='--psm 6')
+                
+                # Look for "Page X" pattern
+                match = re.search(r'Page\s*(\d+)', text, re.IGNORECASE)
+                
+                if match:
+                    extracted_num = int(match.group(1))
+                    page_numbers_found.append({
+                        'physical_page': page_num,
+                        'extracted_number': extracted_num,
+                        'expected': page_num
+                    })
+                    
+                    # Check if matches expected
+                    if extracted_num != page_num:
+                        issues.append({
+                            'page': page_num,
+                            'expected': page_num,
+                            'found': extracted_num,
+                            'issue': f'Page number mismatch: expected {page_num}, found {extracted_num}'
+                        })
+                else:
+                    # Page number not found where expected
+                    issues.append({
+                        'page': page_num,
+                        'issue': f'Page number not found on page {page_num}'
+                    })
+        
+        # Check for sequence gaps
+        extracted_nums = [p['extracted_number'] for p in page_numbers_found if 'extracted_number' in p]
+        if extracted_nums:
+            # Should be: 1, 3, 5, 7...
+            expected_sequence = list(range(1, len(images) + 1, 2))
+            
+            if sorted(extracted_nums) != expected_sequence[:len(extracted_nums)]:
+                issues.append({
+                    'issue': 'Page numbering sequence is not consistent',
+                    'expected': expected_sequence[:len(extracted_nums)],
+                    'found': sorted(extracted_nums)
+                })
+        
+        # Calculate risk score
+        if len(issues) > 3:
+            risk_score = 80
+        elif len(issues) > 1:
+            risk_score = 50
+        elif len(issues) == 1:
+            risk_score = 25
+        else:
+            risk_score = 0
+        
+        return {
+            'risk_score': risk_score,
+            'applicable': True,
+            'page_numbers_found': page_numbers_found,
+            'issues': issues,
+            'total_pages': len(images)
+        }
+        
+    except Exception as e:
+        return {
+            'risk_score': 0,
+            'applicable': True,
+            'error': str(e),
+            'issues': []
+        }
+
+
+def extract_and_check_noa_id(pdf_bytes, file_name='unknown.pdf', doc_type='unknown'):
+    """
+    Extract identification number from NOA and check for duplicates
+    
+    Args:
+        pdf_bytes: PDF file as bytes
+        file_name: Original file name
+        doc_type: Document type
+    
+    Returns:
+        dict with risk_score, id_number, is_duplicate, and details
+    """
+    
+    # Only applicable to NOA
+    if doc_type.lower() != 'noa':
+        return {
+            'risk_score': 0,
+            'applicable': False,
+            'message': 'ID number check only applies to NOA documents'
+        }
+    
+    # Check if Tesseract is available
+    if not TESSERACT_AVAILABLE:
+        return {
+            'risk_score': 0,
+            'applicable': True,
+            'error': 'Tesseract OCR not installed - required for ID extraction',
+            'id_number': None,
+            'is_duplicate': False
+        }
+    
+    try:
+        # Convert first page to image with higher DPI for better OCR quality
+        images = convert_from_bytes(pdf_bytes, dpi=300)
+        first_page = images[0]
+        
+        # Crop center-right area where the ID is located
+        # This region includes the Notice details box and the ID below "Date issued"
+        width, height = first_page.size
+        # Best results: center-right area (40-80% width, 10-30% height)
+        id_region = first_page.crop((width * 0.4, height * 0.1, width * 0.8, height * 0.3))
+        
+        # OCR with PSM 11 (sparse text) for better accuracy on individual fields
+        text = pytesseract.image_to_string(id_region, config='--psm 11')
+        
+        # Try multiple strategies to find the ID
+        id_match = None
+        
+        # Strategy 1: Look for 8-9 character alphanumeric pattern (most common)
+        # Pattern like: 5X4YR5JX or 5SX4YR5JX (OCR might add extra chars)
+        matches = re.findall(r'\b([A-Z0-9]{8,10})\b', text, re.IGNORECASE)
+        
+        # Filter matches that look like IDs (not other numbers/text)
+        for match in matches:
+            match_upper = match.upper()
+            # Look for patterns like X4YR or X5J (typical ID patterns)
+            if re.search(r'[A-Z0-9]*[XY][0-9][A-Z]{2}', match_upper):
+                id_match = match_upper
+                break
+        
+        # Strategy 2: Look specifically after "Date issued"
+        if not id_match and 'date issued' in text.lower():
+            idx = text.lower().find('date issued')
+            text_after_date = text[idx+50:]
+            pattern_match = re.search(r'\b([A-Z0-9]{8,10})\b', text_after_date, re.IGNORECASE)
+            if pattern_match:
+                id_match = pattern_match.group(1).upper()
+        
+        # Strategy 3: Fallback - any 8-10 char alphanumeric
+        if not id_match and matches:
+            id_match = matches[0].upper()
+        
+        if not id_match:
+            return {
+                'risk_score': 30,
+                'applicable': True,
+                'id_number': None,
+                'issue': 'Could not extract identification number from NOA',
+                'is_duplicate': False,
+                'debug_ocr_text': text[:300] if text else 'No text extracted'  # Debug info
+            }
+        
+        # Clean up OCR errors: "5SX" -> "5X", "0" -> "O" in certain positions
+        id_number = id_match
+        if id_number.startswith('5SX') and len(id_number) == 9:
+            id_number = '5X' + id_number[3:]  # Remove extra S
+        elif id_number.startswith('5S') and len(id_number) >= 8:
+            id_number = '5' + id_number[2:]  # Remove S completely
+        
+        # Check for duplicates in database
+        from .database import ForensicDatabase
+        db = ForensicDatabase()
+        duplicate_check = db.check_duplicate_id(id_number)
+        
+        if duplicate_check['is_duplicate']:
+            # CRITICAL: This document uses a previously seen ID!
+            db.record_duplicate_detection(id_number, file_name)
+            
+            return {
+                'risk_score': 100,  # Maximum risk!
+                'applicable': True,
+                'id_number': id_number,
+                'is_duplicate': True,
+                'duplicate_details': duplicate_check['original_record'],
+                'flags': [
+                    f'🚨 DUPLICATE ID DETECTED!',
+                    f'This ID was previously used in: {duplicate_check["original_record"]["file_name"]}',
+                    f'Original upload date: {duplicate_check["original_record"]["uploaded_timestamp"]}',
+                    f'This indicates DOCUMENT FORGERY - same NOA used twice'
+                ]
+            }
+        else:
+            # New ID - store it
+            # Try to extract additional info for better tracking
+            
+            sin_last_4 = None
+            full_name = None
+            date_issued = None
+            
+            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                first_page_text = pdf.pages[0].extract_text()
+                
+                # Extract SIN (XXX XX3 241 format)
+                sin_match = re.search(r'XXX XX(\d) (\d{3})', first_page_text)
+                if sin_match:
+                    sin_last_4 = sin_match.group(1) + sin_match.group(2)
+                
+                # Extract name (line after "Notice details" or before address)
+                name_match = re.search(r'([A-Z\s]+)\n\d+\s+[A-Z]', first_page_text)
+                if name_match:
+                    full_name = name_match.group(1).strip()
+                
+                # Extract date issued
+                date_match = re.search(r'Date issued\s+([A-Za-z]+\s+\d+,\s+\d{4})', first_page_text)
+                if date_match:
+                    date_issued = date_match.group(1)
+            
+            # Calculate document hash for integrity
+            import hashlib
+            doc_hash = hashlib.sha256(pdf_bytes).hexdigest()[:16]
+            
+            # Store in database
+            stored = db.store_id_number(
+                identification_number=id_number,
+                sin_last_4=sin_last_4,
+                full_name=full_name,
+                date_issued=date_issued,
+                document_hash=doc_hash,
+                file_name=file_name
+            )
+            
+            return {
+                'risk_score': 0,
+                'applicable': True,
+                'id_number': id_number,
+                'is_duplicate': False,
+                'stored': stored,
+                'extracted_info': {
+                    'sin_last_4': sin_last_4,
+                    'full_name': full_name,
+                    'date_issued': date_issued
+                },
+                'flags': [
+                    f'✅ New ID recorded: {id_number}',
+                    'ID stored in forensic database for future duplicate detection'
+                ]
+            }
+    
+    except Exception as e:
+        return {
+            'risk_score': 0,
+            'applicable': True,
+            'error': str(e),
+            'id_number': None,
+            'is_duplicate': False
         }
 
